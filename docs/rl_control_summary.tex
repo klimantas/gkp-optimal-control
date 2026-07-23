@@ -1,0 +1,141 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{braket}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black, citecolor=blue!50!black}
+\setlist[itemize]{leftmargin=*, itemsep=2pt, topsep=3pt}
+\setlist[enumerate]{leftmargin=*, itemsep=2pt, topsep=3pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+
+\newcommand{\adag}{a^\dagger}
+
+\title{RL Controls for Brachistochrone-Guided GKP State Preparation:\\ Project Summary and Working Plan}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Project overview}
+
+The collaboration is studying time-optimal preparation of finite-energy GKP states from vacuum in a single bosonic mode, with the quantum brachistochrone as the organizing principle. The work has three layers.
+
+\subsection*{Analytic layer (Aidan)}
+
+The brachistochrone-optimal Hamiltonian is derived explicitly for GKP targets. The finite-energy logical state is written as a lattice sum of displaced vacua with amplitudes $\zeta_{m,l} = m\alpha + l\beta$; the Gaussian envelope $e^{-\Delta^2 \adag a}$ rescales the displacement amplitudes,
+\begin{equation}
+\zeta_{m,l} \;\longrightarrow\; \zeta^\Delta_{m,l} = e^{-\Delta^2}\zeta_{m,l},
+\end{equation}
+so the optimal Hamiltonian's projectors $\ket{\mu_L^\perp}\bra{0}$ and $\ket{0}\bra{\mu_L^\perp}$ become closed-form lattice sums. These are further expandable into theta-function coefficients $\Theta_n^{(\pm)}$, a normal-ordered bosonic polynomial $\sum_{n,p} K_{n,p}(\adag)^n a^p$, and an exact Weyl symbol whose torus structure follows from the lattice rather than being assumed.
+
+\subsection*{Benchmark layer (Juan)}
+
+For any pure target in a finite Fock cutoff, decompose
+\begin{equation}
+\ket{\psi_f} = c_0\ket{0} + \sqrt{1-c_0^2}\,\ket{\eta},
+\qquad c_0 = \braket{0}{\psi_f} \in [0,1].
+\end{equation}
+The reference Hamiltonian
+\begin{equation}
+H_B = \frac{i\hbar\Omega}{2}\left(\ket{\eta}\bra{0} - \ket{0}\bra{\eta}\right)
+\end{equation}
+generates the Fubini--Study geodesic from vacuum to target in time $T_B = 2\arccos(c_0)/\Omega$. $H_B$ is explicitly a benchmark object, not an implementable Hamiltonian. The benchmark metrics are final fidelity $F_T$, maximum fidelity over time $F_{\max}$, mean path deviation $D_{\rm path}$ (equivalently $\bar d_{\rm FS}$), mean leakage $\overline{L}_{\rm prep}$ out of $\mathrm{span}\{\ket{0},\ket{\eta}\}$, path-length ratio $R_{\rm length}$, and time overhead $\mathcal{R}_T = T/T_B$.
+
+\subsection*{Numerical layer (Juan)}
+
+Three established results at $n_{\rm cut} = 96$:
+\begin{enumerate}
+  \item \textbf{Projector-truncation convergence.} The orthogonal target component has 47 significant even-parity Fock coefficients (threshold $10^{-12}$); retaining all of them recovers the geodesic to numerical precision (mean FS deviation $1.62\times10^{-8}$, mean leakage $3\times10^{-16}$).
+  \item \textbf{Static even-photon pump hierarchy.} A lab-facing control family with detuning, Kerr, and Hermitian even-photon pumps
+  \begin{equation}
+  X_n = (\adag)^n + a^n, \qquad Y_n = i\left[(\adag)^n - a^n\right], \qquad n \in \{2,4,6,8\},
+  \end{equation}
+  calibrated with L-BFGS-B (bounded static gains, nested seeding), climbs from $0.588$ final fidelity ($P2$) through $0.858$ ($P24$) and $0.869$ ($P246$) to $\mathbf{0.984}$ ($P2468$), with stabilizer match $0.970$.
+  \item \textbf{Proof-of-principle RL layer} over the same primitives (macro-action scheduling), flagged as the natural next step.
+\end{enumerate}
+Parity constrains the control family: vacuum and the finite-energy $\ket{+Z_L}$ target are both even under photon-number parity, so odd pumps have vanishing first-order matrix elements into the desired tangent direction and are excluded.
+
+\section{RL contribution: design decisions}
+
+\subsection*{Flattened action space}
+
+The original macro-action formulation ($A_j \in \{P2, P4, P6, P8, P24, P246, P2468\}$ plus continuous amplitudes) is a hybrid action space, but the discrete layer is redundant: every macro-action is a support pattern within one shared continuous space (e.g.\ $P24$ with $(u_2, u_4)$ equals $P2468$ with $(u_2, u_4, 0, 0)$). We therefore flatten to a single box,
+\begin{equation}
+a_j = (u_{2,x}, u_{2,y}, u_{4,x}, u_{4,y}, u_{6,x}, u_{6,y}, u_{8,x}, u_{8,y}) \in [-u_{\max}, u_{\max}]^8,
+\end{equation}
+optionally extended by a segment-duration dimension. This is native to standard continuous-control algorithms (SAC, PPO, TD3) with no algorithmic surgery. Sparsity moves from a hard-coded menu into an L1 penalty on $\|u\|_1$; if hard on/off gating is later required (e.g.\ fixed turn-on costs in hardware), a Gumbel-softmax mask with annealed temperature is the differentiable upgrade path. What flattening costs --- structured exploration over qualitatively distinct pump sets, and the nested-hierarchy narrative --- is recovered by warm-starting (below) and by reading learned support patterns off the trained policy with a small reporting deadband.
+
+\subsection*{Training pipeline}
+
+\begin{enumerate}
+  \item[\textbf{Stage 0.}] \textbf{Environment verification.} Replay the static $P2468$ L-BFGS-B solution as a fixed action sequence and require the environment to reproduce final fidelity $\approx 0.984$. This factorizes physics bugs from RL bugs before any training. Per-step evolution uses Krylov-based \texttt{expm\_multiply} rather than dense matrix exponentials, keeping step cost well under a millisecond at $n_{\rm cut}=96$.
+  \item[\textbf{Stage 1.}] \textbf{Warm start via behavior cloning.} Regress the policy mean onto the static solution at every visited observation, leaving the policy variance as the exploration budget. Training then starts at the static optimum, so any improvement is cleanly attributable to time-dependent scheduling. Seed the replay buffer with noisy static rollouts.
+  \item[\textbf{Stage 2.}] \textbf{SAC fine-tuning.} Off-policy learning reuses demonstration data; automatic entropy tuning removes the most fragile hyperparameter; $\gamma \approx 1$ is appropriate for short finite horizons. Guards against catastrophic forgetting of the warm start: pinned demonstration data, a decaying auxiliary BC loss, or an initial critic-only phase. Reward components are logged separately so the sparsity penalty never silently dominates the fidelity signal.
+  \item[\textbf{Stage 3.}] \textbf{Curriculum (contingency).} If direct training stalls: anneal along envelope width $\Delta$ (fatter envelope $\Rightarrow$ fewer significant coefficients $\Rightarrow$ easier target deforming continuously into the real one), segment count, or restricted-then-full pump sets mirroring $P2 \subset P24 \subset \cdots$.
+\end{enumerate}
+
+L-BFGS-B remains the static calibrator (quasi-Newton curvature estimation with box constraints: the right tool for 8 smooth bounded parameters, but local and open-loop). A proposed middle rung is a GRAPE-style L-BFGS-B optimization over the full $\sim$320-parameter time-dependent open-loop schedule, giving the clean ablation \emph{static $\to$ open-loop optimal control $\to$ learned policy}.
+
+\section{Science question and methodological constraints}
+
+The collaboration wishes to highlight (i) the clean geodesic formulation on GKP/bosonic states and (ii) whether the RL-learned path \emph{approaches} the time-optimal path over training.
+
+\subsection*{Non-circularity requirement}
+
+For the convergence claim to be meaningful, \textbf{the geodesic must not appear in the training reward}. Penalizing $D_{\rm path}$ during training and then reporting decreasing $D_{\rm path}$ demonstrates only that the optimizer minimizes its objective. All geodesic-referencing quantities ($D_{\rm path}$, $R_{\rm length}$, velocity alignment) are therefore evaluation-side only. Emergent geodesic-following would show that the brachistochrone geometry is the shape of any good solution in this control family, not an artifact of reward shaping.
+
+\subsection*{Scale convention making time-optimality well-posed}
+
+$T_B$ is meaningful only after fixing $\Omega$; the RL policy is instead constrained by amplitude bounds $|u| \le u_{\max}$. The bridge is the Mandelstam--Tamm quantum speed limit, $v_{\rm FS}(t) \le \Delta H(t)/\hbar$: the brachistochrone both follows the geodesic and saturates this bound with constant $\Delta H_B = \hbar\Omega/2$. We therefore fix
+\begin{equation}
+\frac{\hbar\Omega}{2} \;=\; \max_{\,|u| \le u_{\max}} \Delta H,
+\end{equation}
+the maximum energy uncertainty achievable within the bounded pump family. Under this convention $\mathcal{R}_T = T/T_B \ge 1$ holds by construction, and ``approaching time-optimality'' is precisely $\mathcal{R}_T \to 1$.
+
+\subsection*{Restructured reward (minimum-time formulation)}
+
+Variable horizon terminating at $F(t) \ge F_{\rm thresh}$ (matched to the static baseline, e.g.\ $0.98$) or at a generous maximum; per-step cost $-\Delta t$; terminal success bonus; and a single dense shaping term, potential-based with
+\begin{equation}
+\Phi(s) = -\,\theta(s) = -\arccos\left|\braket{\psi_f}{\psi(s)}\right|,
+\qquad r_{\rm shape} = \Phi(s') - \Phi(s),
+\end{equation}
+which provably leaves the optimal policy unchanged and references only the destination, never the route. Geometrically, $r_{\rm shape}$ rewards angular progress toward the target per unit time --- pushing toward speed-limit saturation without knowledge of the geodesic path. Because the L1 sparsity penalty mildly conflicts with time-optimality (saturating the QSL favors hard driving), training splits into:
+\begin{itemize}
+  \item \textbf{Track A} --- pure minimum-time reward; hardware realism via box bounds only. Basis of the convergence claim.
+  \item \textbf{Track B} --- adds sparsity/power/smoothness penalties. Produces the lab-facing schedules.
+\end{itemize}
+
+\subsection*{Evaluation protocol}
+
+Time-optimality factors into two independently measurable conditions:
+\begin{enumerate}
+  \item \textbf{Directness}: geodesic-following, via $D_{\rm path}$, $R_{\rm length}$, and pointwise alignment of the instantaneous projective velocity with the geodesic direction.
+  \item \textbf{Speed saturation}: QSL efficiency
+  \begin{equation}
+  \eta(t) = \frac{\hbar\, v_{\rm FS}(t)}{\Delta H(t)} \in [0,1].
+  \end{equation}
+\end{enumerate}
+A trajectory is brachistochrone-like iff both are $\approx 1$. Evaluation uses the deterministic (mean-action) policy, $\ge 5$ seeds with reported spread, benchmarked against two reference lines: the static $P2468$ baseline ($0.984$) and the truncated-projector ceiling ($\approx 1$).
+
+\textbf{Headline figure:} $\mathcal{R}_T$, $D_{\rm path}$, and mean $\eta$ versus training iteration. \textbf{Companion figure:} asymptotic $D_{\rm path}$ versus pump-family richness ($P24$, $P246$, $P2468$, \dots), connecting the RL results to the analytic projector-convergence study and tying all three layers of the project into a single plot. The learned pulse schedules $u_{n,x}(t), u_{n,y}(t)$ are themselves a primary deliverable.
+
+\textbf{Caveat on record:} exact QSL saturation is likely impossible within a finite pump family --- the achievable velocity directions at each point span only a low-dimensional slice of projective space, which generically excludes the geodesic direction. The quantitative object of interest is the \emph{gap} versus family richness; the gap is itself the physics result.
+
+\section{Open items}
+
+\begin{enumerate}
+  \item Build the minimum-time environment variant with the $\Omega$-matching convention baked in.
+  \item Construct the finite-energy $\ket{+Z_L}$ target from the lattice-sum expressions and run the Stage-0 verification against the $0.984$ static baseline.
+  \item Implement the GRAPE-style open-loop baseline (L-BFGS-B over the full time-dependent schedule).
+  \item Fix $F_{\rm thresh}$ and curriculum trigger thresholds with the group.
+  \item Decide whether ``$P24$ + scheduling vs.\ $P2468$ static'' is promoted to a headline experiment --- the cleanest lab-relevant claim if time-dependent scheduling can substitute for higher-order nonlinearity.
+\end{enumerate}
+
+\end{document}
