@@ -51,6 +51,76 @@ def kerr_cavity_squeezing_controls(n_fock: int) -> jnp.ndarray:
     return jnp.stack([h_i, h_q])
 
 
+@partial(jax.jit, static_argnames=("n_fock", "orders", "normalize"))
+def even_pump_controls(
+    n_fock: int,
+    orders: tuple[int, ...] = (2, 4, 6, 8),
+    normalize: bool = True,
+) -> jnp.ndarray:
+    r"""Even-photon pump hierarchy :math:`X_n, Y_n` for the GKP control family.
+
+    For each order :math:`n` in ``orders`` this builds the Hermitian pair
+
+    .. math::
+        X_n = (a^\dagger)^n + a^n, \qquad Y_n = i\bigl(a^n - (a^\dagger)^n\bigr),
+
+    and stacks them as ``[X_{n0}, Y_{n0}, X_{n1}, Y_{n1}, ...]``. With the
+    default ``orders=(2, 4, 6, 8)`` the result is the 8-operator stack whose
+    coefficients are the flattened control vector
+    :math:`(u_{2,x}, u_{2,y}, \ldots, u_{8,x}, u_{8,y})`.
+
+    Parity note: only even orders are included — odd pumps couple opposite
+    photon-number parities and are excluded by the GKP target's parity
+    structure.
+
+    Normalization: the raw operators grow like :math:`n_\text{fock}^{n/2}` in
+    spectral norm (e.g. at ``n_fock=100`` the norms span ~1.8e2 for
+    :math:`X_2` to ~1e8 for :math:`X_8`). Feeding controls that differ by six
+    orders of magnitude into a single optimizer is catastrophically
+    ill-conditioned — the line search overshoots the small-scale directions
+    into ``expm`` overflow. With ``normalize=True`` (default) each operator is
+    divided by its spectral norm so every control has unit norm; the control
+    amplitude then carries the physical scale and ``max ΔH`` over the unit box
+    is well-defined (needed for the Ω-matching QSL convention). Set
+    ``normalize=False`` to recover the raw operators — the raw ``n = 2`` pair
+    then coincides with :func:`kerr_cavity_squeezing_controls`.
+
+    .. warning::
+        The spectral norm is dominated by the truncation edge, so the
+        normalized higher-order operators depend on ``n_fock``. Keep
+        ``n_fock`` fixed when comparing pulses or reporting ``R_T``.
+
+    Parameters
+    ----------
+    n_fock : int
+        Fock-space truncation dimension (static).
+    orders : tuple of int, default ``(2, 4, 6, 8)``
+        Even pump orders to include (static; must be a hashable tuple so the
+        result shape is a compile-time constant).
+    normalize : bool, default True
+        Divide each operator by its spectral norm (static).
+
+    Returns
+    -------
+    jnp.ndarray
+        Stack of shape ``(2 * len(orders), n_fock, n_fock)``, ordered
+        ``[X, Y]`` per pump order in the order given.
+    """
+    a, adag, _ = cavity_operators(n_fock)
+    ops = []
+    for n in orders:
+        a_n = jnp.linalg.matrix_power(a, n)
+        adag_n = jnp.linalg.matrix_power(adag, n)
+        x_n = adag_n + a_n
+        y_n = 1j * (a_n - adag_n)
+        if normalize:
+            x_n = x_n / jnp.linalg.norm(x_n, 2)
+            y_n = y_n / jnp.linalg.norm(y_n, 2)
+        ops.append(x_n)
+        ops.append(y_n)
+    return jnp.stack(ops)
+
+
 @partial(jax.jit, static_argnames=("n_fock",))
 def cavity_displacement_controls(n_fock: int) -> jnp.ndarray:
     r"""Linear (displacement) drives :math:`a + a^\dagger` and

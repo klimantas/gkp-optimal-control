@@ -260,6 +260,8 @@ def run_grape(
     maxiter: int = 800,
     verbose: bool = True,
     progress_every: int = 10,
+    ftol: float = 1e-12,
+    gtol: float = 1e-10,
 ):
     """Run a GRAPE optimization end to end.
 
@@ -268,6 +270,10 @@ def run_grape(
     progress_every : int
         Print progress every N iterations during optimization.
         Set to 0 to disable iteration-level progress (only show final summary).
+    ftol, gtol : float
+        L-BFGS-B convergence tolerances. The defaults suit float64; for
+        float32 / complex64 runs loosen them (e.g. ``ftol=1e-9, gtol=1e-7``)
+        so the line search doesn't stall at the single-precision noise floor.
     """
     cost, params_to_pulse, diagnostics = make_cost(system, time_grid, band, penalties)
     cost_and_grad = jax.jit(value_and_grad(cost))
@@ -328,7 +334,7 @@ def run_grape(
         jac=True,
         method="L-BFGS-B",
         callback=callback,
-        options={"maxiter": maxiter, "ftol": 1e-12, "gtol": 1e-10},
+        options={"maxiter": maxiter, "ftol": ftol, "gtol": gtol},
     )
 
     diag = diagnostics(jnp.array(result.x.reshape(param_shape)))

@@ -126,9 +126,6 @@ def plot_wigner(
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
 
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-
     wmax = float(np.abs(wigner).max())
     if wmax == 0.0:
         norm = mpl_colors.TwoSlopeNorm(vmin=-1e-12, vcenter=0.0, vmax=1e-12)
@@ -147,6 +144,7 @@ def plot_wigner(
     )
 
     if add_colorbar:
+        cax = make_axes_locatable(ax).append_axes("right", size="5%", pad=0.05)
         cbar = ax.figure.colorbar(cf, ax=ax, cax=cax)
         cbar.set_label(r"$W(\alpha)$")
 
