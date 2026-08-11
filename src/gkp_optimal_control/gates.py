@@ -20,6 +20,8 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+from scipy.optimize import minimize
 
 from .hamiltonians import cavity_operators
 
@@ -74,6 +76,81 @@ def apply_generators(
         return new, new
 
     return jax.lax.scan(step, psi0, steps)
+
+
+def optimize_sequence(
+    system,
+    n_layers: int,
+    n_snap: int,
+    *,
+    n_fock: int,
+    seeds: int = 6,
+    maxiter: int = 1000,
+    seed: int = 0,
+    init_scale: float = 1.0,
+) -> dict:
+    r"""Fit an ``n_layers``-deep displacement/SNAP sequence to ``system``'s target.
+
+    Solves the *continuous* inner problem — the gate parameters at a fixed
+    sequence structure — by multi-start L-BFGS on the infidelity, differentiating
+    through the gate exponentials. The discrete structure (how many layers, which
+    gate types, in what order) is left to the caller; that outer combinatorial
+    choice is what an RL agent would search.
+
+    Parameters
+    ----------
+    system : System
+        Supplies ``psi_init`` and ``psi_targ``.
+    n_layers : int
+        Number of ``SNAP·D`` layers.
+    n_snap : int
+        SNAP phases per layer (how many Fock levels are addressable) — the
+        natural "gate-set richness" knob.
+    n_fock : int
+        Fock truncation.
+    seeds, maxiter, seed, init_scale : optimization knobs.
+
+    Returns
+    -------
+    dict
+        ``alphas`` ``(n_layers, 2)``, ``thetas`` ``(n_layers, n_snap)``,
+        ``generators``, ``F``, and ``n_params``.
+    """
+    n_alpha = 2 * n_layers
+
+    def unpack(flat):
+        return flat[:n_alpha].reshape(n_layers, 2), flat[n_alpha:].reshape(n_layers, n_snap)
+
+    def cost(flat):
+        alphas, thetas = unpack(flat)
+        gens = build_sequence_generators(n_fock, alphas, thetas)
+        psi_f, _ = apply_generators(system.psi_init, gens, 1)
+        return -jnp.abs(jnp.vdot(system.psi_targ, psi_f)) ** 2
+
+    cost_grad = jax.jit(jax.value_and_grad(cost))
+
+    def obj(x):
+        val, grad = cost_grad(jnp.asarray(x))
+        return float(val), np.asarray(grad)
+
+    rng = np.random.default_rng(seed)
+    n_params = n_alpha + n_layers * n_snap
+    best_f, best_x = -1.0, None
+    for _ in range(seeds):
+        x0 = rng.normal(0.0, init_scale, n_params)
+        res = minimize(obj, x0, jac=True, method="L-BFGS-B",
+                       options={"maxiter": maxiter, "ftol": 1e-14, "gtol": 1e-12})
+        if -res.fun > best_f:
+            best_f, best_x = -res.fun, res.x
+
+    alphas, thetas = unpack(jnp.asarray(best_x))
+    return {
+        "alphas": alphas,
+        "thetas": thetas,
+        "generators": build_sequence_generators(n_fock, alphas, thetas),
+        "F": best_f,
+        "n_params": n_params,
+    }
 
 
 def sequence_path_length(
