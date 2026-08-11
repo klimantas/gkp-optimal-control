@@ -30,6 +30,7 @@ def main() -> None:
     ap.add_argument("--f-max", type=float, default=100.0)
     ap.add_argument("--maxiter", type=int, default=800)
     ap.add_argument("--f32", action="store_true", help="run in complex64 (for GPU)")
+    ap.add_argument("--save-pulse", default=None, help="write the optimized pulse to this .npy")
     args = ap.parse_args()
 
     # The package enables x64 on import; drop back to 32-bit for --f32 runs.
@@ -58,8 +59,14 @@ def main() -> None:
 
     m = path_metrics(jnp.asarray(diag["pulse"]), system, args.T)
     print("\n=== metrics ===")
-    for k in ("F", "R_length", "mean_eta", "R_T_traj", "R_T_family", "peak_u"):
+    for k in ("F", "R_length", "mean_eta", "D_path", "R_T_traj", "R_T_family", "peak_u"):
         print(f"  {k:12s} {m[k]:.4f}")
+
+    if args.save_pulse:
+        import numpy as np
+
+        np.save(args.save_pulse, np.asarray(diag["pulse"]))
+        print(f"\nsaved pulse -> {args.save_pulse}")
 
 
 if __name__ == "__main__":
