@@ -48,8 +48,9 @@ def main() -> None:
     gains = delta_curriculum(orders, n_fock=args.n_fock, verbose=False)
 
     print(f"orders={orders}  θ={qsl['theta']:.4f}  dH1={qsl['dH1']:.3f}  backend={jax.default_backend()}")
-    print(f"{'T':>6} {'nstep':>6} {'F':>8} {'peak|u|':>9} {'R_len':>7} {'meanEta':>8} {'RT_traj':>8}")
-    print("-" * 60)
+    print(f"{'T':>6} {'nstep':>6} {'F':>8} {'peak|u|':>9} {'R_len':>7} {'meanEta':>8} "
+          f"{'D_path':>8} {'RT_traj':>8}")
+    print("-" * 70)
 
     rows = []
     band = FourierBand(f_max=args.f_max)
@@ -61,9 +62,10 @@ def main() -> None:
         _, diag, _ = run_grape(system, tg, band, pen, params0=params0,
                                maxiter=args.maxiter, verbose=False, ftol=ftol, gtol=gtol)
         m = path_metrics(jnp.asarray(diag["pulse"]), system, t, qsl=qsl)
-        rows.append((t, n_steps, m["F"], m["peak_u"], m["R_length"], m["mean_eta"], m["R_T_traj"]))
+        rows.append((t, n_steps, m["F"], m["peak_u"], m["R_length"], m["mean_eta"],
+                     m["D_path"], m["R_T_traj"]))
         print(f"{t:6.2f} {n_steps:6d} {m['F']:8.4f} {m['peak_u']:9.1f} "
-              f"{m['R_length']:7.2f} {m['mean_eta']:8.4f} {m['R_T_traj']:8.1f}")
+              f"{m['R_length']:7.2f} {m['mean_eta']:8.4f} {m['D_path']:8.4f} {m['R_T_traj']:8.1f}")
 
     if args.out:
         np.save(args.out, np.array(rows))
