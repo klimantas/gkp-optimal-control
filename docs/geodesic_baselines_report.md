@@ -83,11 +83,19 @@ n ∈ {2,4,6,8} — the same 8-dimensional space as the planned RL action space.
 
 ### Two problems, both solved
 
-**Conditioning.** Raw pump operators span six orders of magnitude in norm
-(‖X₂‖ ≈ 176, ‖X₈‖ ≈ 10⁸ at n_fock=100), and L-BFGS-B fails immediately. Normalizing by the
-*full* spectral norm fixes the crash but over-corrects: that norm is set by the
-Fock-truncation edge, leaving the high-order pumps inert where the states actually live.
-**The fix is to normalize on the populated subspace** (Fock 0…N_phys, N_phys = 42).
+**Conditioning.** Raw pump norms scale as `n_fock^(n/2)` — measured 1.76×10², 1.49×10⁴,
+1.25×10⁶, 1.05×10⁸ for n = 2,4,6,8 at n_fock = 100 — so the eight controls differ by six
+orders of magnitude and L-BFGS-B aborts on the first line search (0 iterations).
+Normalizing by the *full* spectral norm fixes that, but the full norm is attained at the
+Fock-truncation edge (n ≈ 92) while the target lives at n ≲ 42: the full/subspace norm ratio
+grows with pump order (2.6, 7.0, 18.7, 49.8), leaving X₈ ≈ 19× more weakly coupled than X₂
+where the states actually are. **The fix is to normalize on the populated subspace**
+(Fock 0…N_phys, N_phys = 42), giving equal effective coupling across the family and making
+the ΔH scale in `R_T` a statement about physics rather than about the truncation.
+
+This is necessary but not sufficient: it removes an arbitrary, `n_fock`-dependent bias and
+makes the optimization well-conditioned, but the higher pumps only actually get *used* once
+the Δ-curriculum below escapes the squeezing basin.
 
 **The squeezing basin.** Every direct optimization stalled at F = 0.573 — which is exactly
 the overlap of the best squeezed vacuum with the target. The optimizer was finding the
