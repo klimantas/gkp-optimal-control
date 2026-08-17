@@ -9,12 +9,23 @@ across a noise sweep.
 
 Method notes that matter:
 
-* The optimization uses a **fixed** set of noise draws (common random numbers),
-  so the objective is deterministic and L-BFGS-B behaves. Evaluation then uses
-  **fresh** draws, so the reported robustness is not the pulse overfitting the
-  particular perturbations it trained on.
-* Noise is multiplicative-free additive jitter on the applied amplitudes, in
-  units of ``u_max`` — the same convention as the sensitivity measurement.
+* **Noise is resampled every iteration** and the optimizer is Adam. An earlier
+  version used a fixed set of 12 draws with L-BFGS-B (common random numbers, so
+  the objective stays deterministic); it overfit badly — 0.9905 on the training
+  draws against 0.7769 on fresh draws at the same sigma, ending up *worse* than
+  the naive pulse everywhere. Twelve realizations cannot cover an
+  ``n_controls x n_steps`` perturbation space. Resampling removes the set to
+  memorize; Adam tolerates the resulting stochastic gradient.
+* Perturbations are drawn in **antithetic pairs** (+eps, -eps), which cancels the
+  odd-order terms of the expansion and cuts gradient variance for free.
+* Why not a "flatness penalty" on ``|dF/du|``: at any optimum that gradient is
+  zero by construction, so it penalizes nothing. Robustness is second order —
+  ``E[F(u+eps)] ~ F(u) + (sigma^2/2) tr(Hessian)`` — and the finite-difference
+  estimator of that trace at radius sigma is exactly the antithetic average used
+  here. Sampling and the correct flatness penalty coincide.
+* Evaluation always uses **fresh** draws, never the training ones.
+* Noise is additive jitter on the applied amplitudes, in units of ``u_max`` —
+  the same convention as the sensitivity measurement.
 
 Example
 -------
@@ -27,6 +38,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import value_and_grad
+import optax
 from scipy.optimize import minimize
 
 from gkp_optimal_control.curriculum import constant_warmstart, delta_curriculum
@@ -53,6 +65,8 @@ def main() -> None:
     ap.add_argument("--n-train-draws", type=int, default=16)
     ap.add_argument("--n-eval-draws", type=int, default=256)
     ap.add_argument("--maxiter", type=int, default=400)
+    ap.add_argument("--adam-iters", type=int, default=3000)
+    ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--f32", action="store_true")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -72,19 +86,7 @@ def main() -> None:
         psi = forward_evolve(pulse, tg.dt, system.psi_init, system.H_drift, system.H_controls)
         return jnp.abs(jnp.vdot(system.psi_targ, psi)) ** 2
 
-    def mean_fidelity(pulse, perturbs):
-        """Average fidelity over a stack of additive amplitude perturbations."""
-        return jax.vmap(lambda p: fidelity_of(pulse + p))(perturbs).mean()
-
-    # Fixed training draws (common random numbers) -> deterministic objective.
-    rng = np.random.default_rng(0)
-    train_eps = jnp.asarray(
-        rng.normal(0.0, args.sigma * args.u_max,
-                   (args.n_train_draws, system.n_controls, args.n_steps)),
-        dtype=jnp.float32 if args.f32 else jnp.float64,
-    )
-
-    print(f"sigma={args.sigma:.3f}*u_max, {args.n_train_draws} training draws "
+    print(f"sigma={args.sigma:.3f}*u_max, {args.n_train_draws} resampled antithetic draws/iter "
           f"| backend {jax.default_backend()}")
     gains = delta_curriculum((2, 4, 6, 8), n_fock=args.n_fock, verbose=False)
     params0 = constant_warmstart(gains, band, tg, system.n_controls)
@@ -104,11 +106,42 @@ def main() -> None:
               f"{float(fidelity_of(pulse)):.4f}, peak|u| {float(jnp.abs(pulse).max()):.0f}")
         return pulse
 
-    # Both pulses come from the same warm start and settings; only the objective
-    # differs, so the comparison isolates noise-awareness.
     naive_pulse = optimize(lambda p: -fidelity_of(p2pulse(p)), "naive ")
-    robust_pulse = optimize(lambda p: -mean_fidelity(p2pulse(p), train_eps), "robust")
-    print()
+
+    # --- robust: Adam on a freshly-resampled antithetic estimate each step ----
+    n_pairs = max(args.n_train_draws // 2, 1)
+    scale = args.sigma * args.u_max
+
+    def robust_loss(params, key):
+        eps = scale * jax.random.normal(
+            key, (n_pairs, system.n_controls, args.n_steps), dtype=params.dtype
+        )
+        pulse = p2pulse(params)
+        # Antithetic pair: evaluate at +eps and -eps, average all 2*n_pairs.
+        both = jnp.concatenate([eps, -eps], axis=0)
+        return -jax.vmap(lambda e: fidelity_of(pulse + e))(both).mean()
+
+    tx = optax.adam(args.lr)
+    params = jnp.asarray(params0)
+    opt_state = tx.init(params)
+    loss_grad = jax.jit(value_and_grad(robust_loss))
+
+    @jax.jit
+    def adam_step(params, opt_state, key):
+        loss, grads = loss_grad(params, key)
+        updates, opt_state = tx.update(grads, opt_state, params)
+        return optax.apply_updates(params, updates), opt_state, loss
+
+    key = jax.random.PRNGKey(0)
+    for i in range(args.adam_iters):
+        key, sub = jax.random.split(key)
+        params, opt_state, loss = adam_step(params, opt_state, sub)
+        if i % max(args.adam_iters // 6, 1) == 0:
+            print(f"    adam {i:5d}  E[F] (resampled) {-float(loss):.4f}")
+    robust_pulse = p2pulse(params)
+    print(f"  robust: noiseless {float(fidelity_of(robust_pulse)):.4f}, "
+          f"peak|u| {float(jnp.abs(robust_pulse).max()):.0f}\n")
+
     pulses = {"naive": naive_pulse, "robust": robust_pulse}
 
     # Evaluate on FRESH draws at several noise levels.
