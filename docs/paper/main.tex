@@ -39,10 +39,12 @@ these to continuous pump pulses and to hardware-native gate sequences
 sequences reach high fidelity while travelling through states nearly orthogonal
 to the entire geodesic, and that a least-squares analysis pins the cause: $\HB$
 lies outside the span of the available control operators, so only $62$--$79\%$ of
-the required velocity can ever be produced. We also report a claim of our own that
-these tools refuted --- an apparent geodesic ``floor'' for pulses turned out to be
-slack, removable at a cost of $0.8\%$ fidelity --- and set out the experiments
-that would settle the corresponding question for gates.
+the required velocity can ever be produced. Optimizing both families explicitly against the geodesic settles the
+comparison on equal footing: pulses reach $\Dpath\approx0.16$ at $F=0.99$ where
+gate sequences plateau near $0.76$, a gap \emph{wider} than a fidelity-only
+comparison suggests. Along the way we retract a claim of our own --- an apparent
+geodesic ``floor'' for pulses was slack, removable for $0.8\%$ fidelity --- and
+identify a degeneracy that any path-deviation objective must guard against.
 \end{abstract}
 
 \section{Motivation}
@@ -323,12 +325,12 @@ $0.5$ & $0.9980$ & $0.237$ & $161$ \\
 $1.0$ & $0.9943$ & $0.192$ & $167$ \\
 $2.0$ & $0.9920$ & $\mathbf{0.155}$ & $172$ \\
 $5.0$ & $0.878$ & $0.075$ & $94$ \\
-$10.0$ & $0.654$ & $0.048$ & $60$ \\
 \bottomrule
 \end{tabular}
-\caption{Reachability frontier for the pump family. The exchange rate
-$dF/d\Dpath$ rises from $0.01$ to $8.1$ across the knee: path-optimality is nearly
-free until $\Dpath\approx0.155$, and expensive thereafter.}
+\caption{Reachability frontier for the pump family. Path-optimality is nearly free
+until $\Dpath\approx0.155$ and expensive thereafter. A row at $\lambda=10$ was
+removed: it is dominated by the trivial solution below, and is therefore not a
+Pareto point.}
 \label{tab:pareto}
 \end{table}
 
@@ -340,6 +342,58 @@ least-squares tracker of Eq.~\eqref{eq:ls} is dominated by the globally optimize
 frontier, confirming its single point was not the limit.}
 \label{fig:pareto}
 \end{figure}
+
+\subsection{$\Dpath$ has a trivial minimizer}
+\label{sec:trivial}
+
+Any objective containing $\Dpath$ must contend with a degenerate solution: vacuum
+\emph{is} $\ket{\gamma(0)}$, so a trajectory that does nothing at all scores
+$\Dpath=0$ exactly, at $F=c_0^2=0.2962$. For $\lambda\gtrsim0.5$ this trivial
+point beats any honest attempt on the raw objective, and a multi-start optimizer
+falls straight into it --- as ours did, returning $F=0.2962$, $\Dpath=0$, $\Rlen=0$
+for every large $\lambda$ in a first attempt. We therefore solve $\lambda=0$ first,
+warm-start each subsequent $\lambda$ from the previous solution, and verify
+explicitly that each reported point beats the trivial one. This is a general
+hazard for path-deviation objectives, not a quirk of this system.
+
+\subsection{Gates approach the geodesic, but not as closely}
+\label{sec:gatepareto}
+
+Applying the same sweep to a four-layer displacement$+$SNAP sequence
+(Table~\ref{tab:gatepareto}) settles the comparison on equal footing: both
+families optimized against a geodesic-aware objective, compared at matched
+fidelity. Gates improve substantially on their fidelity-only value --- $1.116$ to
+$0.693$ --- but the curve flattens as fidelity begins to erode, approaching an
+asymptote near $0.7$. Pulses reach $0.155$ while still at $F=0.992$.
+
+At $F\approx0.99$ the two families sit at $\Dpath\approx0.16$ and
+$\Dpath\approx0.76$ respectively: a factor of four to five. Notably this gap is
+\emph{wider} than the fidelity-only comparison suggested ($0.46$ versus $1.03$, a
+factor of $2.2$). Testing both arms properly sharpened the distinction rather than
+dissolving it, and it is the velocity-deficit of Eq.~\eqref{eq:ls} that supplies
+the mechanism.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+$\lambda$ & $F$ & $\Dpath$ & $\Rlen$ \\
+\midrule
+$0$ (fidelity only) & $0.9964$ & $1.116$ & $20.1$ \\
+$0.10$ & $0.9970$ & $0.906$ & $21.5$ \\
+$0.20$ & $0.9947$ & $0.834$ & $19.3$ \\
+$0.35$ & $0.9896$ & $0.788$ & $20.4$ \\
+$0.50$ & $0.9866$ & $0.735$ & $19.8$ \\
+$0.80$ & $0.9702$ & $\mathbf{0.693}$ & $15.9$ \\
+\bottomrule
+\end{tabular}
+\caption{Reachability frontier for a four-layer displacement$+$SNAP sequence.
+Every row beats the trivial solution of Section~\ref{sec:trivial}. Compare
+Table~\ref{tab:pareto}: at matched fidelity $F\approx0.99$, pulses reach
+$\Dpath\approx0.16$ where gates reach only $\approx0.76$.}
+\label{tab:gatepareto}
+\end{table}
 
 \subsection{A learned policy does not close the gap}
 
@@ -391,13 +445,10 @@ target is a specific state whose Wigner function can be inspected. As with
 Section~\ref{sec:pareto}, this places the geodesic in the objective and therefore
 measures reachability.
 
-\paragraph{The frontier for gates.} The $\Dpath\approx1.03$ of
-Table~\ref{tab:gates} was measured the same fidelity-only way that turned out to
-leave a factor of three on the table for pulses. Until the gate families are
-optimized against a geodesic-aware objective, calling $1.03$ a floor is
-unsupported --- and comparing a targeted pulse number against an untargeted gate
-number would be indefensible. If gates \emph{do} remain near $1.03$ under that
-test, it becomes a considerably stronger result than the present one.
+\paragraph{ECD under the same test.} Section~\ref{sec:gatepareto} settles the
+comparison for displacement$+$SNAP. Repeating it for ECD would establish whether
+the $\approx0.7$ asymptote is a property of gate-based control generally or of
+that one instruction set, and is the natural completion of Table~\ref{tab:gates}.
 
 \paragraph{Wigner diagnostics along every protocol.} Extending
 Figure~\ref{fig:gatepath} to ECD and to the waypoint-optimized sequences gives a
