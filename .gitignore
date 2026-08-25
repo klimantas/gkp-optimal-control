@@ -34,3 +34,9 @@ vids/
 
 .env
 .DS_Store
+
+# LaTeX build artifacts
+docs/paper/*.aux
+docs/paper/*.log
+docs/paper/*.out
+docs/paper/build.log
