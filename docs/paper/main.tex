@@ -201,14 +201,40 @@ handle well, while the discrete structure --- which gate, how many, in what orde
 --- is combinatorial and is the part a learned or search-based method would have
 to supply.
 
-\paragraph{Escaping the squeezing basin.} Direct optimization of either family
-from a random start stalls at $F=0.573$, which is precisely the overlap of the
-best squeezed vacuum with the target. This is not a failure of the optimizer but a
-deep local optimum: squeezing is the strongest single control, and escaping
-requires coordinated use of the higher-order pumps. We solve it by homotopy
-continuation in the envelope width, annealing $\Delta$ from $1.0$ to $0.3$ and
-warm-starting each step. The resulting constant-Hamiltonian solution reaches
-$F=0.877$ and is then used to warm-start the time-dependent optimization.
+\paragraph{The Gaussian ceiling.} Direct optimization from a small-amplitude
+random start stalls at $F=0.573$ for every method we tried, including
+reinforcement learning. This is not an optimizer artifact but a statement about
+the accessible states: optimizing over \emph{all} pure Gaussian states reachable
+from vacuum --- displacement and squeezing together, four free real parameters ---
+gives a maximum overlap with the target of $0.5729$, matching the stall exactly.
+Of the eight pump controls only $X_2$ and $Y_2$ are quadratic in $a$ and hence
+Gaussian; $X_4$ through $Y_8$ are the non-Gaussian resource. Getting past
+$F=0.573$ therefore \emph{is} the act of engaging non-Gaussianity, and since GKP
+states are Wigner-negative --- a property no Gaussian operation can create --- no
+protocol can succeed without it.
+
+We verified the stall is a genuine local optimum rather than a saddle or a
+tolerance artifact: at the stalled point the gradient norm is $5\times10^{-10}$,
+the gains are $(0,\,43.2,\,0,\dots,0)$ (pure squeezing), and $200$ random
+directions at each of six step sizes spanning $10^{-3}$ to $10^{2}$ are all
+downhill. The basin is wide --- perturb-and-reoptimize escapes only for
+perturbations exceeding roughly twice the solution's own norm --- which is why
+small-amplitude multistarts land in it reliably.
+
+\paragraph{Escaping it.} We use homotopy continuation in the envelope width,
+annealing $\Delta$ from $1.0$ to $0.3$ and warm-starting each step: at large
+$\Delta$ the target is nearly Gaussian and squeezing almost suffices, and each
+small decrease keeps the previous solution inside the new basin. This is
+continuation in \emph{degree of non-Gaussianity}. The resulting
+constant-Hamiltonian solution then warm-starts the time-dependent optimization.
+
+It is not the only route out. Large-amplitude random restarts also escape, and on
+raw fidelity did better ($F=0.877$ against the curriculum's $0.776$ for the same
+eight-pump constant-Hamiltonian problem). What continuation appears to buy is not
+fidelity but \emph{geometry}: its solution has $\Rlen=56$, where a
+large-random-init solution at equal final fidelity reaches $\Rlen=17079$. Escaping
+the basin and escaping it well are different things --- a distinction that recurs
+in Section~\ref{sec:pareto}.
 
 \section{Results}
 
