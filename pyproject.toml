@@ -27,20 +27,22 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
+    "diffrax>=0.7.2",
+    "flax>=0.12.7",
     "jax>=0.10.0",
     "jaxquantum>=0.3.0",
-    "jupyter>=1.1.1",
     "matplotlib>=3.10.8",
     "numpy>=1.26",
-    "qutip-jax>=0.1.1",
-    "qutip-qtrl>=0.1.5",
-    "sympy>=1.14.0",
+    "optax>=0.2.8",
+    "optimistix>=0.1.0",
+    "scipy>=1.16",
 ]
 
 [project.optional-dependencies]
 notebooks = [
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
+    "qutip>=5.2.3",
 ]
 
 [dependency-groups]
@@ -49,7 +51,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.11.7,<0.12"]
+requires = ["uv_build>=0.11.7,<0.13"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

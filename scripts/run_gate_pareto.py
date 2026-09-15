@@ -7,13 +7,20 @@ optimized against an objective that cares about the geodesic, calling 1.03 a
 floor is unsupported, and comparing a targeted pulse number against an untargeted
 gate number would be indefensible.
 
-This runs the same sweep for displacement+SNAP:
+This runs the same sweep
 
     L = -F + lam * D_path
 
-over the gate parameters (displacements and SNAP phases), with the sequence
-structure held fixed. lam=0 is the control and should reproduce the fidelity-only
-result.
+over the gate parameters, with the sequence structure held fixed, for either
+instruction set:
+
+  --family snap : displacement + SNAP, parameters (Re a, Im a) and theta per layer
+  --family ecd  : echoed conditional displacement, (Re b, Im b, theta, phi) per
+                  layer, on the joint cavity (x) qubit space
+
+Both arms share this file's objective, continuation schedule, and trivial-solution
+check, so the two instruction sets are compared on identical terms -- the point of
+the experiment. lam=0 is the control and should reproduce the fidelity-only result.
 
 Outcomes:
   * gates fall like pulses did  -> the invariance across gate sets was an artifact
@@ -21,6 +28,8 @@ Outcomes:
   * gates stay near 1.03        -> a genuine structural result, considerably
     stronger than the present one, because it survives the test that refuted the
     pulse version.
+  * snap and ecd plateau alike  -> the asymptote is a property of gate-based
+    control, not of one instruction set.
 
 As with run_pareto.py the geodesic is in the objective by construction, so this
 measures a reachability limit and is separate from the emergence claim.
@@ -33,9 +42,15 @@ We therefore solve lam = 0 first and warm-start each subsequent lam from the
 previous solution, and we report whether each result actually beats the trivial
 solution -- a row that does not is not a Pareto point.
 
+Note on matching fidelity across families: ECD carries 4 parameters per layer
+against SNAP's 2 + n_snap, so a fidelity-matched comparison needs far more ECD
+layers (~16 for F ~ 0.99, per figures/ecd_sweep.npy) than SNAP layers (4).
+Compare rows at matched F, never at matched layer count.
+
 Example
 -------
-    uv run python scripts/run_gate_pareto.py --layers 4 --lams 0,0.5,2,5 --f32
+    uv run python scripts/run_gate_pareto.py --family snap --layers 4 --lams 0,0.5,2 --f32
+    uv run python scripts/run_gate_pareto.py --family ecd --layers 16 --lams 0,0.2,0.5 --f32
 """
 
 import argparse
@@ -51,6 +66,7 @@ from gkp_optimal_control.diagnostics import (
     qsl_constants,
     trajectory_metrics,
 )
+from gkp_optimal_control.ecd import build_ecd_generators, build_ecd_system
 from gkp_optimal_control.gates import (
     apply_generators,
     build_sequence_generators,
@@ -59,12 +75,59 @@ from gkp_optimal_control.gates import (
 from gkp_optimal_control.systems import build_gkp_system
 
 
+def make_family(args, dtype):
+    """Build the system and the parameterization for the requested gate family.
+
+    Returns
+    -------
+    system, qsl, n_params, build_gens, draw_init, label
+        ``build_gens(flat)`` maps a flat real vector to a generator stack;
+        ``draw_init(rng)`` draws one random start of the right shape.
+    """
+    if args.family == "snap":
+        system, meta = build_gkp_system(args.delta, n_fock=args.n_fock, dtype=dtype)
+        qsl = qsl_constants(system, meta["n_phys"])
+        n_snap = args.n_snap or meta["n_phys"]
+        n_alpha = 2 * args.layers
+        n_params = n_alpha + args.layers * n_snap
+
+        def build_gens(flat):
+            alphas = flat[:n_alpha].reshape(args.layers, 2)
+            thetas = flat[n_alpha:].reshape(args.layers, n_snap)
+            return build_sequence_generators(args.n_fock, alphas, thetas)
+
+        def draw_init(rng):
+            return rng.normal(0.0, 1.0, n_params)
+
+        label = f"displacement+SNAP | {args.layers} layers, n_snap={n_snap}"
+    else:
+        system, meta = build_ecd_system(args.delta, args.n_fock)
+        # H_controls is a zero placeholder for ECD (gates are applied directly),
+        # so the corner scan for dH1 is meaningless here; only theta/c0 are used.
+        qsl = qsl_constants(system, n_phys=meta["dim"])
+        n_params = 4 * args.layers
+
+        def build_gens(flat):
+            return build_ecd_generators(args.n_fock, flat.reshape(args.layers, 4))
+
+        def draw_init(rng):
+            return np.concatenate([
+                rng.normal(0.0, 1.0, (args.layers, 2)),        # beta
+                rng.uniform(0.0, np.pi, (args.layers, 1)),     # qubit theta
+                rng.uniform(0.0, 2 * np.pi, (args.layers, 1)),  # qubit phi
+            ], axis=1).ravel()
+
+        label = f"ECD | {args.layers} layers, joint dim={meta['dim']}"
+    return system, qsl, n_params, build_gens, draw_init, label
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--family", choices=["snap", "ecd"], default="snap")
     ap.add_argument("--delta", type=float, default=0.3)
     ap.add_argument("--n-fock", type=int, default=100)
     ap.add_argument("--layers", type=int, default=4)
-    ap.add_argument("--n-snap", type=int, default=None)
+    ap.add_argument("--n-snap", type=int, default=None, help="snap only")
     ap.add_argument("--lams", default="0,0.2,0.5,1,2,5")
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--maxiter", type=int, default=600)
@@ -81,32 +144,34 @@ def main() -> None:
     dtype = jnp.complex64 if args.f32 else jnp.complex128
     ftol, gtol = (1e-9, 1e-7) if args.f32 else (1e-12, 1e-10)
 
-    system, meta = build_gkp_system(args.delta, n_fock=args.n_fock, dtype=dtype)
-    qsl = qsl_constants(system, meta["n_phys"])
-    n_snap = args.n_snap or meta["n_phys"]
+    system, qsl, n_params, build_gens, draw_init, label = make_family(args, dtype)
     curve = geodesic_curve(system, args.n_geo).astype(dtype)
-    n_alpha = 2 * args.layers
 
-    def unpack(flat):
-        return (flat[:n_alpha].reshape(args.layers, 2),
-                flat[n_alpha:].reshape(args.layers, n_snap))
+    # d/dx arccos(x) = -1/sqrt(1-x^2) diverges as the overlap approaches 1 --
+    # exactly the limit this objective drives toward, since D_path -> 0 means
+    # landing on the curve. Clipping strictly below 1 caps the gradient at
+    # 1/sqrt(2*eps) and floors D_path at sqrt(2*eps), which is ~1e-3 (f32) or
+    # ~1e-6 (f64): orders of magnitude below anything reported. Without this the
+    # objective returns NaN and L-BFGS aborts at the warm start, silently
+    # returning the previous lambda's solution unchanged.
+    ov_eps = 1e-6 if args.f32 else 1e-12
 
     def traj_of(flat, substeps):
-        alphas, thetas = unpack(flat)
-        gens = build_sequence_generators(args.n_fock, alphas, thetas)
+        gens = build_gens(flat)
         psi_f, traj = apply_generators(system.psi_init, gens, substeps)
         return psi_f, traj, gens
 
-    print(f"gate Pareto | {args.layers} layers, n_snap={n_snap}, "
-          f"theta={qsl['theta']:.4f} | backend {jax.default_backend()}")
+    print(f"gate Pareto | {label}")
+    print(f"theta={qsl['theta']:.4f}  n_params={n_params}  backend={jax.default_backend()}")
     print("reference: fidelity-only gates D_path ~ 1.03 | pulses reach 0.155 | random 1.395\n")
-    trivial_F = float(qsl["c0"] ** 2)
-    print(f"trivial do-nothing solution: F={trivial_F:.4f}, D_path=0 "
+    trivial_f = float(qsl["c0"] ** 2)
+    print(f"trivial do-nothing solution: F={trivial_f:.4f}, D_path=0 "
           f"(vacuum lies on the geodesic) -- any row not beating it is not a Pareto point\n")
     print(f"{'lambda':>8} {'F':>8} {'D_path':>8} {'R_len':>8} {'beats trivial?':>15}")
     print("-" * 52)
 
     rows = []
+    params = []
     prev_x = None
     for lam in [float(x) for x in args.lams.split(",")]:
 
@@ -114,7 +179,7 @@ def main() -> None:
             psi_f, traj, _ = traj_of(flat, args.opt_substeps)
             fidelity = jnp.abs(jnp.vdot(system.psi_targ, psi_f)) ** 2
             ov = jnp.abs(traj @ jnp.conj(curve).T)
-            dev = jnp.arccos(jnp.clip(jnp.max(ov, axis=1), 0.0, 1.0)).mean()
+            dev = jnp.arccos(jnp.clip(jnp.max(ov, axis=1), 0.0, 1.0 - ov_eps)).mean()
             return -fidelity + lam * dev
 
         cg = jax.jit(value_and_grad(cost))
@@ -124,11 +189,9 @@ def main() -> None:
             return float(v), np.asarray(g)
 
         # Continuation: multi-start only at lam=0, then follow the solution.
-        starts = []
         if prev_x is None:
             rng = np.random.default_rng(0)
-            starts = [rng.normal(0.0, 1.0, n_alpha + args.layers * n_snap)
-                      for _ in range(args.seeds)]
+            starts = [draw_init(rng) for _ in range(args.seeds)]
         else:
             starts = [prev_x]
         best = None
@@ -137,6 +200,7 @@ def main() -> None:
                            options={"maxiter": args.maxiter, "ftol": ftol, "gtol": gtol})
             if best is None or res.fun < best.fun:
                 best = res
+        assert best is not None, "at least one start is required"
         prev_x = best.x
 
         _, _, gens = traj_of(jnp.asarray(best.x), 1)
@@ -144,14 +208,21 @@ def main() -> None:
                                                substeps=args.eval_substeps)
         m = trajectory_metrics(traj, system, length=length, qsl=qsl)
         score = -m["F"] + lam * m["D_path"]
-        ok = score < -trivial_F
+        ok = score < -trivial_f
         rows.append((lam, m["F"], m["D_path"], m["R_length"], float(ok)))
+        params.append(np.asarray(best.x))
         print(f"{lam:8.2f} {m['F']:8.4f} {m['D_path']:8.4f} {m['R_length']:8.2f} "
               f"{('yes' if ok else 'NO - degenerate'):>15}")
 
     if args.out:
         np.save(args.out, np.array(rows))
-        print(f"\nsaved {args.out}")
+        # Save the parameters too: metrics alone cannot reconstruct a solution,
+        # so Wigner diagnostics or any re-analysis would need a full re-run.
+        pz = str(args.out).replace(".npy", "_params.npz")
+        np.savez(pz, params=np.stack(params), lams=np.array([r[0] for r in rows]),
+                 family=args.family, layers=args.layers, n_fock=args.n_fock,
+                 n_snap=(args.n_snap or 0))
+        print(f"\nsaved {args.out}\nsaved {pz}")
 
 
 if __name__ == "__main__":

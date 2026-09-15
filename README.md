@@ -42,7 +42,14 @@ compared.
 ```bash
 git clone https://github.com/<you>/gkp-optimal-control.git
 cd gkp_optimal_control
-uv sync
+uv sync                      # library + scripts
+uv run python scripts/run_baseline.py
+```
+
+The notebooks need Jupyter and QuTiP, which live in an optional extra:
+
+```bash
+uv sync --extra notebooks
 uv run jupyter lab
 ```
 

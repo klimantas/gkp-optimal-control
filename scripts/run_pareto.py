@@ -77,12 +77,20 @@ def main() -> None:
         )
         return pulse, psi_f, traj
 
+    # d/dx arccos(x) = -1/sqrt(1-x^2) diverges as the overlap approaches 1, the
+    # limit this objective drives toward. Clipping strictly below 1 caps the
+    # gradient and floors D_path at sqrt(2*eps), far below anything reported.
+    # The pulse family never reaches that regime (min D_path here is 0.075, i.e.
+    # overlap 0.997), so this is defensive; the gate families do reach it, and
+    # without the clip the objective returns NaN and L-BFGS aborts silently.
+    ov_eps = 1e-6 if args.f32 else 1e-12
+
     def soft_metrics(traj, psi_f):
         fidelity = jnp.abs(jnp.vdot(system.psi_targ, psi_f)) ** 2
         # Nearest point on the geodesic for each visited state; gradient flows
         # through the argmax, which is standard and sufficient here.
         ov = jnp.abs(traj @ jnp.conj(curve).T)                 # (n_steps, n_geo)
-        dev = jnp.arccos(jnp.clip(jnp.max(ov, axis=1), 0.0, 1.0)).mean()
+        dev = jnp.arccos(jnp.clip(jnp.max(ov, axis=1), 0.0, 1.0 - ov_eps)).mean()
         return fidelity, dev
 
     print(f"Pareto sweep | T={args.T} n_steps={args.n_steps} theta={qsl['theta']:.4f} "
@@ -97,6 +105,7 @@ def main() -> None:
     print(f"{'lambda':>8} {'F':>8} {'D_path':>8} {'R_len':>8} {'peak|u|':>9}")
     print("-" * 46)
     rows = []
+    pulses = []
     for lam in [float(x) for x in args.lams.split(",")]:
 
         def cost(params, lam=lam):
@@ -115,12 +124,18 @@ def main() -> None:
         pulse = p2pulse(jnp.asarray(res.x.reshape(shape)))
         m = path_metrics(pulse, system, args.T, qsl=qsl)      # full 2001-sample D_path
         rows.append((lam, m["F"], m["D_path"], m["R_length"], m["peak_u"]))
+        pulses.append(np.asarray(pulse))
         print(f"{lam:8.2f} {m['F']:8.4f} {m['D_path']:8.4f} {m['R_length']:8.2f} "
               f"{m['peak_u']:9.1f}")
 
     if args.out:
         np.save(args.out, np.array(rows))
-        print(f"\nsaved {args.out}")
+        # Keep the pulses: metrics alone cannot reconstruct a trajectory, so any
+        # later Wigner or geometry re-analysis would otherwise need a full re-run.
+        pz = str(args.out).replace(".npy", "_pulses.npz")
+        np.savez(pz, pulses=np.stack(pulses), lams=np.array([r[0] for r in rows]),
+                 T=args.T, n_steps=args.n_steps, f_max=args.f_max)
+        print(f"\nsaved {args.out}\nsaved {pz}")
 
 
 if __name__ == "__main__":
