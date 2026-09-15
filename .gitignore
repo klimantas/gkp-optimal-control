@@ -35,8 +35,6 @@ vids/
 .env
 .DS_Store
 
-# LaTeX build artifacts
-docs/paper/*.aux
-docs/paper/*.log
-docs/paper/*.out
-docs/paper/build.log
+# The manuscript lives in its own repo (klimantas/bsp-paper), checked out beside
+# this one; docs/paper is a local convenience symlink into it, not content.
+/docs/paper
