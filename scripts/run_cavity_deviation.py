@@ -48,6 +48,7 @@ SOURCES = [
     ("figures/waypoints_snap8_warm_params.npz", "ms", "snap", "SNAP 8L waypoints"),
     ("figures/waypoints_snap12_warm_params.npz", "ms", "snap", "SNAP 12L waypoints"),
     ("figures/gate_pareto_ecd_rerun_params.npz", "lams", "ecd", "ECD 16L penalty (rerun)"),
+    ("figures/gate_pareto_ecd_chains_params.npz", "lams", "ecd", "ECD 16L penalty (12 chains)"),
     ("figures/gate_pareto_snap_extended_params.npz", "lams", "snap", "SNAP 4L penalty"),
 ]
 
@@ -58,8 +59,14 @@ def analyse(npz_path, knob, family, delta, substeps, n_geo):
     n_snap = int(d["n_snap"]) if "n_snap" in d.files and int(d["n_snap"]) else None
     system, qsl, _, build_gens, _, lab = make_gate_family(
         family, delta=delta, n_fock=n_fock, layers=layers, n_snap=n_snap)
+    knobs, params = np.asarray(d[knob]), np.asarray(d["params"])
+    if params.ndim == 3:
+        # --chains output: (chains, knob, n_params). Flatten, tiling the knob,
+        # so every chain's every lambda is scored individually.
+        knobs = np.tile(knobs, params.shape[0])
+        params = params.reshape(-1, params.shape[-1])
     out = []
-    for v, flat in zip(np.asarray(d[knob]), np.asarray(d["params"]), strict=True):
+    for v, flat in zip(knobs, params, strict=True):
         gens = build_gens(jnp.asarray(flat))
         _, dense, length = sequence_path_length(system.psi_init, gens,
                                                 substeps=substeps)
@@ -92,6 +99,23 @@ def main() -> None:
             continue
         lab, out = analyse(path, knob, family, args.delta, args.substeps, args.n_geo)
         print(f"\n{title}  [{lab}]")
+        repeated = len({r[0] for r in out}) < len(out)
+        if repeated:
+            # A --chains sweep: per-row output would be dozens of lines, and the
+            # distribution is the point, not any individual chain.
+            print(f"{knob:>6} {'n':>4} {'D_path med':>11} {'D_cav med':>10} "
+                  f"{'D_cav min':>10} {'D_cav max':>10} {'ancilla':>8}")
+            print("-" * 70)
+            for v in sorted({r[0] for r in out}):
+                grp = [r for r in out if r[0] == v]
+                dps = np.array([r[2] for r in grp])
+                dcs = np.array([r[3] for r in grp])
+                print(f"{v:6g} {len(grp):>4} {np.median(dps):11.4f} "
+                      f"{np.median(dcs):10.4f} {dcs.min():10.4f} "
+                      f"{dcs.max():10.4f} "
+                      f"{1 - np.median(dcs) / np.median(dps):8.0%}")
+            rows.extend((title, *r) for r in out)
+            continue
         print(f"{knob:>6} {'F':>8} {'D_path':>9} {'D_cav':>9} {'floor':>8} "
               f"{'mean p_g':>9} {'ancilla share':>14}")
         print("-" * 70)
