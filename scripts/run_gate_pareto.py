@@ -61,64 +61,13 @@ import numpy as np
 from jax import value_and_grad
 from scipy.optimize import minimize
 
-from gkp_optimal_control.diagnostics import (
-    geodesic_curve,
-    qsl_constants,
-    trajectory_metrics,
-)
-from gkp_optimal_control.ecd import build_ecd_generators, build_ecd_system
+from gkp_optimal_control.diagnostics import geodesic_curve, trajectory_metrics
+from gkp_optimal_control.families import make_gate_family
 from gkp_optimal_control.gates import (
     apply_generators,
-    build_sequence_generators,
     sequence_path_length,
 )
-from gkp_optimal_control.systems import build_gkp_system
-
-
-def make_family(args, dtype):
-    """Build the system and the parameterization for the requested gate family.
-
-    Returns
-    -------
-    system, qsl, n_params, build_gens, draw_init, label
-        ``build_gens(flat)`` maps a flat real vector to a generator stack;
-        ``draw_init(rng)`` draws one random start of the right shape.
-    """
-    if args.family == "snap":
-        system, meta = build_gkp_system(args.delta, n_fock=args.n_fock, dtype=dtype)
-        qsl = qsl_constants(system, meta["n_phys"])
-        n_snap = args.n_snap or meta["n_phys"]
-        n_alpha = 2 * args.layers
-        n_params = n_alpha + args.layers * n_snap
-
-        def build_gens(flat):
-            alphas = flat[:n_alpha].reshape(args.layers, 2)
-            thetas = flat[n_alpha:].reshape(args.layers, n_snap)
-            return build_sequence_generators(args.n_fock, alphas, thetas)
-
-        def draw_init(rng):
-            return rng.normal(0.0, 1.0, n_params)
-
-        label = f"displacement+SNAP | {args.layers} layers, n_snap={n_snap}"
-    else:
-        system, meta = build_ecd_system(args.delta, args.n_fock)
-        # H_controls is a zero placeholder for ECD (gates are applied directly),
-        # so the corner scan for dH1 is meaningless here; only theta/c0 are used.
-        qsl = qsl_constants(system, n_phys=meta["dim"])
-        n_params = 4 * args.layers
-
-        def build_gens(flat):
-            return build_ecd_generators(args.n_fock, flat.reshape(args.layers, 4))
-
-        def draw_init(rng):
-            return np.concatenate([
-                rng.normal(0.0, 1.0, (args.layers, 2)),        # beta
-                rng.uniform(0.0, np.pi, (args.layers, 1)),     # qubit theta
-                rng.uniform(0.0, 2 * np.pi, (args.layers, 1)),  # qubit phi
-            ], axis=1).ravel()
-
-        label = f"ECD | {args.layers} layers, joint dim={meta['dim']}"
-    return system, qsl, n_params, build_gens, draw_init, label
+from gkp_optimal_control.optlog import COLUMNS, record, summarize
 
 
 def main() -> None:
@@ -144,7 +93,9 @@ def main() -> None:
     dtype = jnp.complex64 if args.f32 else jnp.complex128
     ftol, gtol = (1e-9, 1e-7) if args.f32 else (1e-12, 1e-10)
 
-    system, qsl, n_params, build_gens, draw_init, label = make_family(args, dtype)
+    system, qsl, n_params, build_gens, draw_init, label = make_gate_family(
+        args.family, delta=args.delta, n_fock=args.n_fock, layers=args.layers,
+        n_snap=args.n_snap, dtype=dtype)
     curve = geodesic_curve(system, args.n_geo).astype(dtype)
 
     # d/dx arccos(x) = -1/sqrt(1-x^2) diverges as the overlap approaches 1 --
@@ -170,9 +121,8 @@ def main() -> None:
     print(f"{'lambda':>8} {'F':>8} {'D_path':>8} {'R_len':>8} {'beats trivial?':>15}")
     print("-" * 52)
 
-    rows = []
-    params = []
-    prev_x = None
+    rows, params, prev_x = [], [], None
+    diag, diag_tags = [], []
     for lam in [float(x) for x in args.lams.split(",")]:
 
         def cost(flat, lam=lam):
@@ -192,21 +142,28 @@ def main() -> None:
         if prev_x is None:
             rng = np.random.default_rng(0)
             starts = [draw_init(rng) for _ in range(args.seeds)]
+            seed_tags = [f"cold{i}" for i in range(len(starts))]
         else:
             starts = [prev_x]
-        best = None
-        for x0 in starts:
+            seed_tags = ["continuation"]
+        def evaluate(flat):
+            _, _, gens = traj_of(jnp.asarray(flat), 1)
+            _, traj, length = sequence_path_length(system.psi_init, gens,
+                                                   substeps=args.eval_substeps)
+            return trajectory_metrics(traj, system, length=length, qsl=qsl)
+
+        best, m = None, None
+        for tag, x0 in zip(seed_tags, starts):
             res = minimize(obj, x0, jac=True, method="L-BFGS-B",
                            options={"maxiter": args.maxiter, "ftol": ftol, "gtol": gtol})
+            # Score every seed, not only the winner: the spread across seeds is
+            # the error bar this sweep otherwise reports without measuring.
+            mi = evaluate(res.x)
+            record(diag, diag_tags, lam, tag, res, mi)
             if best is None or res.fun < best.fun:
-                best = res
+                best, m = res, mi
         assert best is not None, "at least one start is required"
         prev_x = best.x
-
-        _, _, gens = traj_of(jnp.asarray(best.x), 1)
-        _, traj, length = sequence_path_length(system.psi_init, gens,
-                                               substeps=args.eval_substeps)
-        m = trajectory_metrics(traj, system, length=length, qsl=qsl)
         score = -m["F"] + lam * m["D_path"]
         ok = score < -trivial_f
         rows.append((lam, m["F"], m["D_path"], m["R_length"], float(ok)))
@@ -221,8 +178,12 @@ def main() -> None:
         pz = str(args.out).replace(".npy", "_params.npz")
         np.savez(pz, params=np.stack(params), lams=np.array([r[0] for r in rows]),
                  family=args.family, layers=args.layers, n_fock=args.n_fock,
-                 n_snap=(args.n_snap or 0))
+                 n_snap=(args.n_snap or 0),
+                 diag=np.array(diag), diag_tags=np.array(diag_tags),
+                 diag_columns=np.array(COLUMNS))
         print(f"\nsaved {args.out}\nsaved {pz}")
+    print("\nper-seed optimizer diagnostics")
+    print(summarize(diag, diag_tags))
 
 
 if __name__ == "__main__":

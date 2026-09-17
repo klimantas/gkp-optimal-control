@@ -104,6 +104,44 @@ def d_path(traj: jnp.ndarray, system: System, *, n_points: int = 2001) -> dict:
     return {"D_path": float(devs.mean()), "D_path_max": float(devs.max()), "deviations": devs}
 
 
+def arc_length_samples(traj: jnp.ndarray, n_col: int) -> np.ndarray:
+    r"""Indices sampling ``traj`` at equal cumulative Fubini--Study arc length.
+
+    Figure helper. Sampling a trajectory at equal *index* shows where a protocol
+    is in its own program -- which time slice, which gate -- and so devotes most
+    panels to whatever the protocol spends its steps on, including stretches
+    where the state barely moves. Sampling at equal arc length instead shows
+    where the state is in its *journey*, which is the invariance
+    :func:`d_path` itself has: a protocol that follows the geodesic slowly
+    scores the same as one that races along it.
+
+    A trajectory that never moves has no arc to divide, so the indices fall back
+    to an even spread -- a do-nothing solution then renders as the constant state
+    it is, rather than raising a divide-by-zero.
+
+    Parameters
+    ----------
+    traj : jnp.ndarray
+        States, shape ``(n_steps, dim)``. Prepend ``psi_init`` first if the row
+        must genuinely begin at the initial state.
+    n_col : int
+        Number of samples to return, inclusive of both endpoints.
+
+    Returns
+    -------
+    np.ndarray
+        ``n_col`` indices into ``traj``.
+    """
+    t = jnp.asarray(traj)
+    ov = jnp.abs(jnp.sum(jnp.conj(t[:-1]) * t[1:], axis=1))
+    step = np.asarray(jnp.arccos(jnp.clip(ov, 0.0, 1.0)))
+    cum = np.concatenate([[0.0], np.cumsum(step)])
+    if cum[-1] <= 0:
+        return np.linspace(0, len(t) - 1, n_col).astype(int)
+    return np.clip(np.searchsorted(cum, np.linspace(0.0, cum[-1], n_col)),
+                   0, len(t) - 1)
+
+
 def chord_path_length(traj: jnp.ndarray) -> float:
     r"""FS path length as the sum of distances between consecutive states.
 

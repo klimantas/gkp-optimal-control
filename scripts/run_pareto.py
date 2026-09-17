@@ -40,6 +40,7 @@ from gkp_optimal_control.diagnostics import (
     qsl_constants,
 )
 from gkp_optimal_control.grape import FourierBand, TimeGrid, forward_evolve, make_params_to_pulse
+from gkp_optimal_control.optlog import COLUMNS, record, summarize
 from gkp_optimal_control.systems import build_gkp_system
 
 
@@ -102,10 +103,19 @@ def main() -> None:
     params0 = constant_warmstart(gains, band, tg, system.n_controls)
     shape = params0.shape
 
-    print(f"{'lambda':>8} {'F':>8} {'D_path':>8} {'R_len':>8} {'peak|u|':>9}")
-    print("-" * 46)
+    # The do-nothing solution: vacuum IS gamma(0), so it scores D_path = 0 at
+    # F = c0^2 and wins outright once lambda is large enough. Every lambda here
+    # starts from the curriculum warm start rather than from random, which is what
+    # keeps the optimizer out of that basin -- but "kept out" has to be checked,
+    # not assumed, so each row is scored against it explicitly.
+    trivial_f = float(qsl["c0"] ** 2)
+    print(f"trivial do-nothing solution: F={trivial_f:.4f}, D_path=0 "
+          f"-- any row not beating it is not a Pareto point\n")
+    print(f"{'lambda':>8} {'F':>8} {'D_path':>8} {'R_len':>8} {'peak|u|':>9} {'vs trivial':>11}")
+    print("-" * 58)
     rows = []
     pulses = []
+    diag, diag_tags = [], []
     for lam in [float(x) for x in args.lams.split(",")]:
 
         def cost(params, lam=lam):
@@ -123,10 +133,12 @@ def main() -> None:
                        options={"maxiter": args.maxiter, "ftol": ftol, "gtol": gtol})
         pulse = p2pulse(jnp.asarray(res.x.reshape(shape)))
         m = path_metrics(pulse, system, args.T, qsl=qsl)      # full 2001-sample D_path
+        record(diag, diag_tags, lam, "curriculum", res, m)
+        ok = (-m["F"] + lam * m["D_path"]) < -trivial_f
         rows.append((lam, m["F"], m["D_path"], m["R_length"], m["peak_u"]))
         pulses.append(np.asarray(pulse))
         print(f"{lam:8.2f} {m['F']:8.4f} {m['D_path']:8.4f} {m['R_length']:8.2f} "
-              f"{m['peak_u']:9.1f}")
+              f"{m['peak_u']:9.1f} {('yes' if ok else 'NO - degenerate'):>11}")
 
     if args.out:
         np.save(args.out, np.array(rows))
@@ -134,8 +146,12 @@ def main() -> None:
         # later Wigner or geometry re-analysis would otherwise need a full re-run.
         pz = str(args.out).replace(".npy", "_pulses.npz")
         np.savez(pz, pulses=np.stack(pulses), lams=np.array([r[0] for r in rows]),
-                 T=args.T, n_steps=args.n_steps, f_max=args.f_max)
+                 T=args.T, n_steps=args.n_steps, f_max=args.f_max,
+                 diag=np.array(diag), diag_tags=np.array(diag_tags),
+                 diag_columns=np.array(COLUMNS))
         print(f"\nsaved {args.out}\nsaved {pz}")
+    print("\nper-seed optimizer diagnostics")
+    print(summarize(diag, diag_tags))
 
 
 if __name__ == "__main__":

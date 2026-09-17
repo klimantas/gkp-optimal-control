@@ -32,7 +32,12 @@ import numpy as np
 from jax import value_and_grad
 from scipy.optimize import minimize
 
-from gkp_optimal_control.diagnostics import geodesic_curve, qsl_constants, trajectory_metrics
+from gkp_optimal_control.diagnostics import (
+    arc_length_samples,
+    geodesic_curve,
+    qsl_constants,
+    trajectory_metrics,
+)
 from gkp_optimal_control.ecd import build_ecd_generators, build_ecd_system, cavity_entropy
 from gkp_optimal_control.gates import apply_generators, optimize_sequence, sequence_path_length
 from gkp_optimal_control.plotting import plot_wigner, set_plot_style
@@ -133,6 +138,14 @@ def main() -> None:
     seq_states = [system.psi_init] + [per_gate[i] for i in range(per_gate.shape[0])]
     labels = ["vacuum"] + gate_labels
 
+    # The same solution, sampled the other way. Row 2 walks the sequence by gate
+    # index -- where the circuit is in its own program -- so it spends panels on
+    # whatever the circuit spends gates on. Row 1 walks it by Fubini-Study arc
+    # length, which is where the *state* is in its journey and is the invariance
+    # D_path itself has. Showing both rules out the sampling convention as the
+    # explanation for any difference from the geodesic above.
+    dense = jnp.concatenate([system.psi_init[None, :], traj], axis=0)
+
     # Subsample evenly if the sequence is longer than the panel budget.
     if len(seq_states) > args.max_cols:
         keep = np.linspace(0, len(seq_states) - 1, args.max_cols).astype(int)
@@ -147,31 +160,44 @@ def main() -> None:
 
     # For ECD everything lives on the joint space: trace out the qubit so the
     # panels are cavity Wigner functions in both rows.
+    arc_states = [dense[i] for i in arc_length_samples(dense, n_col)]
+
     if is_ecd:
         entropy = cavity_entropy(jnp.stack(seq_states), n_fock)
+        arc_entropy = cavity_entropy(jnp.stack(arc_states), n_fock)
         seq_plot = reduce_cavity(seq_states, n_fock)
+        arc_plot = reduce_cavity(arc_states, n_fock)
         geo_plot = reduce_cavity(geo_states, n_fock)
     else:
-        entropy = None
-        seq_plot, geo_plot = seq_states, geo_states
+        entropy = arc_entropy = None
+        seq_plot, arc_plot, geo_plot = seq_states, arc_states, geo_states
 
     b = args.bound
-    fig, axes = plt.subplots(2, n_col, figsize=(2.35 * n_col, 5.4))
-    for j, (g, q) in enumerate(zip(geo_plot, seq_plot)):
+    fig, axes = plt.subplots(3, n_col, figsize=(2.35 * n_col, 8.1))
+    for j, (g, a, q) in enumerate(zip(geo_plot, arc_plot, seq_plot)):
         plot_wigner(g, x_bound=b, y_bound=b, ax=axes[0, j], add_colorbar=False)
-        plot_wigner(q, x_bound=b, y_bound=b, ax=axes[1, j], add_colorbar=False)
+        plot_wigner(a, x_bound=b, y_bound=b, ax=axes[1, j], add_colorbar=False)
+        plot_wigner(q, x_bound=b, y_bound=b, ax=axes[2, j], add_colorbar=False)
         axes[0, j].set_title(rf"$s={j/(n_col-1):.2f}\,\theta$", fontsize=11, pad=4)
+        arc_sub = f"\n$S={arc_entropy[j]:.2f}$" if arc_entropy is not None else ""
+        axes[1, j].set_title(rf"$\ell={j/(n_col-1):.2f}\,L$" + arc_sub, fontsize=11, pad=4)
         sub = f"\n$S={entropy[j]:.2f}$" if entropy is not None else ""
-        axes[1, j].set_title(labels[j] + sub, fontsize=11, pad=4)
-        for r in (0, 1):
+        axes[2, j].set_title(labels[j] + sub, fontsize=11, pad=4)
+        for r in (0, 1, 2):
             axes[r, j].set_xlabel("")
             axes[r, j].set_ylabel("")
             axes[r, j].set_xticks([])
             axes[r, j].set_yticks([])
 
-    axes[0, 0].set_ylabel("geodesic", fontsize=12)
-    axes[1, 0].set_ylabel(family_name, fontsize=12)
-    extra = (rf", $S_{{\max}}={entropy.max():.2f}$ nats" if entropy is not None else "")
+    axes[0, 0].set_ylabel("geodesic\nby arc length", fontsize=12)
+    axes[1, 0].set_ylabel(f"{family_name}\nby arc length", fontsize=12)
+    axes[2, 0].set_ylabel(f"{family_name}\nby gate index", fontsize=12)
+    # Report S_max over the WHOLE trajectory, not over the nine plotted panels.
+    # Subsampling to 9 columns skips gates, and the skipped ones are where this
+    # sequence actually peaks: the panel max reads 0.67 while the sequence
+    # reaches ln 2 = 0.6931 exactly. Quoting the panel max understates it.
+    extra = (rf", $S_{{\max}}={cavity_entropy(dense, n_fock).max():.3f}$ nats"
+             if entropy is not None else "")
     fig.suptitle(rf"Vacuum $\to |{{+}}Z_L\rangle$: the time-optimal path versus a "
                  rf"{n_layers}-layer {family_name} "
                  rf"($F={m['F']:.3f}$, $D_{{\mathrm{{path}}}}={m['D_path']:.2f}${extra})",
