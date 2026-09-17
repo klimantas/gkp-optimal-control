@@ -79,6 +79,18 @@ def main() -> None:
     ap.add_argument("--n-snap", type=int, default=None, help="snap only")
     ap.add_argument("--lams", default="0,0.2,0.5,1,2,5")
     ap.add_argument("--seeds", type=int, default=4)
+    ap.add_argument("--rng-seed", type=int, default=0,
+                    help="RNG seed for the cold draws; default 0 reproduces "
+                         "every run made before this flag existed")
+    ap.add_argument("--chains", type=int, default=0,
+                    help="run N *independent* continuation chains instead of "
+                         "best-of-seeds-then-continue. The default protocol "
+                         "multi-starts only at lam=0 and follows the single "
+                         "winner, so every downstream lambda inherits one "
+                         "basin and the reported frontier carries no error "
+                         "bar. With --chains each cold draw is continued "
+                         "through the whole lambda ladder on its own, which "
+                         "is what a spread across seeds actually requires.")
     ap.add_argument("--maxiter", type=int, default=600)
     ap.add_argument("--opt-substeps", type=int, default=12,
                     help="substeps inside the objective (cost scales with this)")
@@ -118,44 +130,127 @@ def main() -> None:
     trivial_f = float(qsl["c0"] ** 2)
     print(f"trivial do-nothing solution: F={trivial_f:.4f}, D_path=0 "
           f"(vacuum lies on the geodesic) -- any row not beating it is not a Pareto point\n")
-    print(f"{'lambda':>8} {'F':>8} {'D_path':>8} {'R_len':>8} {'beats trivial?':>15}")
-    print("-" * 52)
+    if not args.chains:
+        print(f"{'lambda':>8} {'F':>8} {'D_path':>8} {'R_len':>8} "
+              f"{'beats trivial?':>15}")
+        print("-" * 52)
+
+    lams = [float(x) for x in args.lams.split(",")]
+
+    def evaluate(flat):
+        _, _, gens = traj_of(jnp.asarray(flat), 1)
+        _, traj, length = sequence_path_length(system.psi_init, gens,
+                                               substeps=args.eval_substeps)
+        return trajectory_metrics(traj, system, length=length, qsl=qsl)
+
+    # One jitted value_and_grad per lambda, cached: with --chains the same
+    # lambda is solved once per chain, and re-tracing each time would dominate
+    # the runtime.
+    _objs: dict[float, object] = {}
+
+    def obj_for(lam):
+        if lam not in _objs:
+
+            def cost(flat, lam=lam):
+                psi_f, traj, _ = traj_of(flat, args.opt_substeps)
+                fidelity = jnp.abs(jnp.vdot(system.psi_targ, psi_f)) ** 2
+                ov = jnp.abs(traj @ jnp.conj(curve).T)
+                dev = jnp.arccos(
+                    jnp.clip(jnp.max(ov, axis=1), 0.0, 1.0 - ov_eps)).mean()
+                return -fidelity + lam * dev
+
+            cg = jax.jit(value_and_grad(cost))
+
+            def obj(x):
+                v, g = cg(jnp.asarray(x))
+                return float(v), np.asarray(g)
+
+            _objs[lam] = obj
+        return _objs[lam]
+
+    def solve(lam, x0):
+        return minimize(obj_for(lam), x0, jac=True, method="L-BFGS-B",
+                        options={"maxiter": args.maxiter, "ftol": ftol, "gtol": gtol})
+
+    def beats_trivial(lam, m):
+        return (-m["F"] + lam * m["D_path"]) < -trivial_f
+
+    diag, diag_tags = [], []
+
+    if args.chains:
+        # Independent continuation chains. Each cold draw is followed through
+        # the entire lambda ladder by itself, so the spread at every lambda is
+        # measured rather than inherited from whichever seed happened to win at
+        # lam=0.
+        rng = np.random.default_rng(args.rng_seed)
+        starts = [draw_init(rng) for _ in range(args.chains)]
+        chain_rows, chain_params = [], []
+        for ci, x0 in enumerate(starts):
+            print(f"\nchain {ci}")
+            print(f"{'lambda':>8} {'F':>8} {'D_path':>8} {'R_len':>8} "
+                  f"{'beats trivial?':>15}")
+            print("-" * 52)
+            rws, prms, prev = [], [], None
+            for lam in lams:
+                res = solve(lam, x0 if prev is None else prev)
+                m = evaluate(res.x)
+                record(diag, diag_tags, lam, f"chain{ci}", res, m)
+                prev = res.x
+                ok = beats_trivial(lam, m)
+                rws.append((lam, m["F"], m["D_path"], m["R_length"], float(ok)))
+                prms.append(np.asarray(res.x))
+                print(f"{lam:8.2f} {m['F']:8.4f} {m['D_path']:8.4f} "
+                      f"{m['R_length']:8.2f} "
+                      f"{('yes' if ok else 'NO - degenerate'):>15}")
+            chain_rows.append(rws)
+            chain_params.append(prms)
+
+        arr = np.array(chain_rows)          # (chains, n_lam, 5)
+        print(f"\nacross {args.chains} independent chains "
+              f"(non-degenerate rows only)")
+        print(f"{'lambda':>8} {'n':>4} {'D_path med':>11} {'min':>8} {'max':>8} "
+              f"{'spread':>8} {'F at best D':>12}")
+        print("-" * 64)
+        for k, lam in enumerate(lams):
+            col = arr[:, k, :]
+            good = col[col[:, 4] > 0]
+            if not len(good):
+                print(f"{lam:8.2f} {0:>4}   all chains degenerate")
+                continue
+            d = good[:, 2]
+            print(f"{lam:8.2f} {len(good):>4} {np.median(d):11.4f} {d.min():8.4f} "
+                  f"{d.max():8.4f} {d.max() - d.min():8.4f} "
+                  f"{good[d.argmin(), 1]:12.4f}")
+
+        if args.out:
+            np.save(args.out, arr)
+            pz = str(args.out).replace(".npy", "_params.npz")
+            np.savez(pz, params=np.array(chain_params), lams=np.array(lams),
+                     family=args.family, layers=args.layers, n_fock=args.n_fock,
+                     n_snap=(args.n_snap or 0), chains=args.chains,
+                     rng_seed=args.rng_seed,
+                     diag=np.array(diag), diag_tags=np.array(diag_tags),
+                     diag_columns=np.array(COLUMNS))
+            print(f"\nsaved {args.out}  (shape {arr.shape}: chains x lambda x "
+                  f"[lam, F, D_path, R_length, beats_trivial])\nsaved {pz}")
+        print("\nper-seed optimizer diagnostics")
+        print(summarize(diag, diag_tags))
+        return
 
     rows, params, prev_x = [], [], None
-    diag, diag_tags = [], []
-    for lam in [float(x) for x in args.lams.split(",")]:
-
-        def cost(flat, lam=lam):
-            psi_f, traj, _ = traj_of(flat, args.opt_substeps)
-            fidelity = jnp.abs(jnp.vdot(system.psi_targ, psi_f)) ** 2
-            ov = jnp.abs(traj @ jnp.conj(curve).T)
-            dev = jnp.arccos(jnp.clip(jnp.max(ov, axis=1), 0.0, 1.0 - ov_eps)).mean()
-            return -fidelity + lam * dev
-
-        cg = jax.jit(value_and_grad(cost))
-
-        def obj(x):
-            v, g = cg(jnp.asarray(x))
-            return float(v), np.asarray(g)
-
+    for lam in lams:
         # Continuation: multi-start only at lam=0, then follow the solution.
         if prev_x is None:
-            rng = np.random.default_rng(0)
+            rng = np.random.default_rng(args.rng_seed)
             starts = [draw_init(rng) for _ in range(args.seeds)]
             seed_tags = [f"cold{i}" for i in range(len(starts))]
         else:
             starts = [prev_x]
             seed_tags = ["continuation"]
-        def evaluate(flat):
-            _, _, gens = traj_of(jnp.asarray(flat), 1)
-            _, traj, length = sequence_path_length(system.psi_init, gens,
-                                                   substeps=args.eval_substeps)
-            return trajectory_metrics(traj, system, length=length, qsl=qsl)
 
         best, m = None, None
         for tag, x0 in zip(seed_tags, starts):
-            res = minimize(obj, x0, jac=True, method="L-BFGS-B",
-                           options={"maxiter": args.maxiter, "ftol": ftol, "gtol": gtol})
+            res = solve(lam, x0)
             # Score every seed, not only the winner: the spread across seeds is
             # the error bar this sweep otherwise reports without measuring.
             mi = evaluate(res.x)
@@ -164,8 +259,7 @@ def main() -> None:
                 best, m = res, mi
         assert best is not None, "at least one start is required"
         prev_x = best.x
-        score = -m["F"] + lam * m["D_path"]
-        ok = score < -trivial_f
+        ok = beats_trivial(lam, m)
         rows.append((lam, m["F"], m["D_path"], m["R_length"], float(ok)))
         params.append(np.asarray(best.x))
         print(f"{lam:8.2f} {m['F']:8.4f} {m['D_path']:8.4f} {m['R_length']:8.2f} "

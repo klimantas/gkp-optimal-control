@@ -104,6 +104,76 @@ def d_path(traj: jnp.ndarray, system: System, *, n_points: int = 2001) -> dict:
     return {"D_path": float(devs.mean()), "D_path_max": float(devs.max()), "deviations": devs}
 
 
+def d_cav(traj: jnp.ndarray, system: System, n_fock: int, *,
+          n_points: int = 2001) -> dict:
+    r"""Cavity-only path deviation, for ancilla-mediated (ECD) trajectories.
+
+    :func:`d_path` scores the **joint** cavity⊗qubit ket, but every geodesic
+    point is :math:`|\gamma(s)\rangle\otimes|g\rangle`: the whole arc lies in the
+    subspace :math:`\mathcal{H}_{\rm cav}\otimes|g\rangle`. The most overlap any
+    joint state can have with that subspace is the weight it puts there,
+    :math:`p_g`, so a sequence is charged for ancilla population even when its
+    cavity sits exactly on the curve --- a penalty displacement+SNAP, having no
+    ancilla, never pays. That makes raw ``D_path`` not comparable across the two
+    families.
+
+    The like-for-like quantity is the deviation of the *reduced cavity* state
+    from the cavity geodesic. Uhlmann fidelity to a pure state is
+    :math:`\langle\gamma|\rho|\gamma\rangle`, hence
+
+    .. math::
+        D_{\rm cav} = \Big\langle \min_s \arccos\sqrt{
+            \langle\gamma(s)|\rho_{\rm cav}(t)|\gamma(s)\rangle}\Big\rangle_t ,
+
+    which reduces to ``D_path`` exactly when the cavity is pure. Evaluation-only,
+    like everything else in this module.
+
+    Parameters
+    ----------
+    traj : jnp.ndarray
+        Joint trajectory, shape ``(n_steps, 2*n_fock)``, qubit the fast axis.
+    system : System
+        Carries the endpoints; its geodesic is ``gamma(s) (x) |g>``.
+    n_fock : int
+        Cavity dimension.
+    n_points : int
+        Samples along the geodesic arc.
+
+    Returns
+    -------
+    dict
+        ``D_cav`` (mean), ``D_cav_max``, and ``deviations`` (per-step).
+    """
+    curve = np.asarray(geodesic_curve(system, n_points))
+    gcav = curve.reshape(-1, n_fock, 2)[:, :, 0]             # qubit factor is |g>
+    amp = np.asarray(traj).reshape(-1, n_fock, 2)
+    # <gamma|rho|gamma> = sum_q |<gamma|c_q>|^2, with c_q the (unnormalised)
+    # cavity vector paired with qubit basis state q -- no density matrix needed.
+    w = sum(np.abs(amp[:, :, q] @ gcav.conj().T) ** 2 for q in (0, 1))
+    devs = np.arccos(np.sqrt(np.clip(w.max(axis=1), 0.0, 1.0)))
+    return {"D_cav": float(devs.mean()), "D_cav_max": float(devs.max()),
+            "deviations": devs}
+
+
+def ancilla_floor(traj: jnp.ndarray, n_fock: int) -> dict:
+    r"""Lower bound on ``D_path`` set by ancilla population alone.
+
+    Since the geodesic lies entirely in :math:`\mathcal{H}_{\rm cav}\otimes|g\rangle`,
+
+    .. math:: D(t) \ge \arccos\sqrt{p_g(t)}, \quad
+              p_g = \langle\psi|(\mathbb{1}\otimes|g\rangle\langle g|)|\psi\rangle .
+
+    Rigorous but loose: it bounds the deviation without attributing it. Use
+    :func:`d_cav` for the tight, comparable number; this is here to show the
+    effect exists independently of that construction.
+    """
+    amp = np.asarray(traj).reshape(-1, n_fock, 2)
+    p_g = np.sum(np.abs(amp[:, :, 0]) ** 2, axis=1)
+    floor = np.arccos(np.sqrt(np.clip(p_g, 0.0, 1.0)))
+    return {"floor": float(floor.mean()), "p_g_mean": float(p_g.mean()),
+            "p_g_min": float(p_g.min()), "floors": floor}
+
+
 def arc_length_samples(traj: jnp.ndarray, n_col: int) -> np.ndarray:
     r"""Indices sampling ``traj`` at equal cumulative Fubini--Study arc length.
 
